@@ -25,7 +25,7 @@ A message for another region goes to the DLQ before any load or write.
 
 ## AI usage
 
-See [agents/README.md](agents/README.md): the prompts, rules and review checklist given to the AI tools, and where their output was corrected or rejected.
+See [agents/SUMMARY.md](agents/SUMMARY.md): the prompts, rules and review checklist given to the AI tools, and where their output was corrected or rejected.
 
 ## Layout
 
