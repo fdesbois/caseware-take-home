@@ -1,3 +1,5 @@
+> **Historical input, superseded.** The first implementation prompt for Part 2. The design later moved offers and summaries to the publish fan-out, so the handler no longer evaluates offers or calls summary-service. `agents/AGENTS.md` and the root `README.md` describe the final component.
+
 # Part 2: engagement message handler (update-service)
 
 You are implementing **Part 2** of the Caseware take-home (`context/Staff_Java_Developer_-_Take-Home_Test 2.pdf`). Read `agents/AGENTS.md`, `agents/REVIEW.md` and, if present, `DESIGN.md` first. **Where they conflict with this prompt, this prompt wins**: your first commit aligns `agents/AGENTS.md` and `agents/REVIEW.md` with it (no claim table or `IdempotencyStore`, nothing keyed by `publishEventId`, the type names below replace the old ones).

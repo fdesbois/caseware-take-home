@@ -23,6 +23,10 @@ A message for another region goes to the DLQ before any load or write.
 - **Virtual threads + a semaphore.** Listeners run on virtual threads, so a minute-long load parks cheaply. Spring Cloud AWS needs an explicit executor for this; it ignores `spring.threads.virtual.enabled`. A fair `Semaphore` wraps `load` and nothing else. The sync listener takes at most one message per permit; the events listener allows 50 messages in flight, set explicitly.
 - **Failures stay per engagement.** Transient load errors (timeout, 429, 5xx) throw, so SQS redelivers them and the queue's DLQ takes over after `maxReceiveCount`. Permanent ones (404, malformed) go straight to the DLQ. There is no backoff: a sync request that reaches the DLQ still has no history, so the next nightly run queues it again; the events DLQ needs an alarm and a manual redrive.
 
+## AI usage
+
+See [agents/README.md](agents/README.md): the prompts, rules and review checklist given to the AI tools, and where their output was corrected or rejected.
+
 ## Layout
 
 ```text
