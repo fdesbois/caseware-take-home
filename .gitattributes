@@ -1,0 +1,3 @@
+# core.autocrlf=true would check mvnw out with CRLF and break it on Linux/macOS.
+mvnw text eol=lf
+*.cmd text eol=crlf

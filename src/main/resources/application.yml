@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: update-service
+  main:
+    # No web server: keep the JVM up even when only daemon (virtual) threads are running.
+    keep-alive: true
