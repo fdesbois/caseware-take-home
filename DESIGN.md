@@ -204,11 +204,11 @@ sequenceDiagram
 | Backfill | 800k × 1 min ÷ 80 | ≈ 7 days (~8 nightly runs) |
 | One-time | 800k loads × ~$0.001; replay 40 × 20–52 summaries × $0.055 | ≈ $0.8k + $0.1k |
 | Publish fan-out | ~20 version groups (max 52), 8 summaries in parallel × ~30 s | 1.5–3.5 min |
-| Summaries | 173 publishes × 20–52 pairs | 3.5k–9k / month |
-| LLM (Sonnet) | 20k input + 1.5k output tokens at $2 / $10 per million ≈ $0.055 | $0.2–0.5k / month (≈ $190k if summarised per engagement) |
+| Summaries | 173 publishes × distinct applied versions (≤ 52) | ≤ 9k / month, likely 0.5k–3.5k |
+| LLM (Sonnet) | 20k input + 1.5k output tokens at $2 / $10 per million ≈ $0.055 | ≤ $0.5k / month (≈ $190k if summarised per engagement) |
 | Storage | 800k × ~10 rows/yr × 150 B; 9k × 100 KB/month | ≈ 1.2 GB/yr in RDS; ≈ 1 GB/month in S3 |
 
-**Run cost ≈ $5k/month:** 3 × RDS SQL Server Multi-AZ ≈ $4.3k (mostly licences), LLM $0.2–0.5k, EKS ≈ $0.3k, SQS/SNS/S3 < $0.1k (< 1 msg/s on average). If $X is tight, cut the database tier (Web or Express edition, or a shared instance) before the model. 
+**Run cost ≈ $0.7–1.2k/month (assumed $X = $2k):** `update-db` on RDS SQL Server Express, single-AZ, per region ≈ $0.1–0.25k (no licence; fits 10 GB for years), LLM ≤ $0.5k, EKS ≈ $0.3k, SQS/SNS/S3 < $0.1k. Multi-AZ Standard would cost ≈ $4.3k in licences; `update-db` is rebuildable, so recovery is a point-in-time restore. 
 
 | SLO / alert | Target |
 |---|---|
