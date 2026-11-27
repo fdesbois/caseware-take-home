@@ -6,12 +6,12 @@ The brief asks for a "template-publish fan-out worker". In this design ([DESIGN.
 
 | Queue | Message | Handling |
 |---|---|---|
-| `engagement-events` | `EngagementStateUpdateEvent`, with the current template version | Append the history row (a duplicate key is a no-op). ACCEPTED and ARCHIVED remove the engagement's offer; DECLINED removes it only if it targets the declined version or an older one. |
+| `engagement-events` | `EngagementStateUpdateEvent`, with the current template version | Append the history row (a duplicate key is a no-op). ARCHIVED removes the engagement's offer; ACCEPTED removes it only if it starts before the accepted version, DECLINED only if it targets the declined version or an older one, so a redelivered decision never erases a newer offer. |
 | `engagement-sync` | `SyncRequest`, queued nightly for engagements with no history | Skip the load if any history row exists. Otherwise take a permit, load (~1 min), release, and append a SYNCED row stamped with engagement-service's read time. |
 
 A message for another region goes to the DLQ before any load or write.
 
-**Observability:** a counter `updates.handler.outcomes{outcome}` (`loaded`, `skipped`, `transient`, `permanent`, `error`) and a gauge `updates.handler.loads.in.flight`. Logs carry only opaque IDs, the region and the outcome.
+**Observability:** a counter `updates.handler.outcomes{outcome}` (`loaded`, `skipped`, `transient`, `permanent`, `error`) and a gauge `updates.handler.loads.in.flight`. Logs carry only opaque IDs, the region and the outcome (not the decision type).
 
 ## Key tradeoffs
 
@@ -55,5 +55,6 @@ The tests need no Docker, no AWS and no sleeps: they use latches, barriers, a mu
 | 3 | Transient and permanent failures stay isolated; no permit leaks | `EngagementMessageHandlerTest` |
 | 4 | A decision made during the load beats the SYNCED snapshot (engagement-service's clock) | `EngagementMessageHandlerTest` |
 | 5 | A decision or an archive removes only the offer it made obsolete | `EngagementMessageHandlerTest` |
-| 6 | A region mismatch goes to the DLQ with no load or write | `EngagementMessageHandlerTest` |
+| 6 | A redelivered acceptance doesn't erase the offer a later publish built from it | `EngagementMessageHandlerTest` |
+| 7 | A region mismatch goes to the DLQ with no load or write | `EngagementMessageHandlerTest` |
 | + | Port contracts, config validation, listener wiring | `InMemoryUpdateDatabaseTest`, `UpdateServicePropertiesTest`, `SqsListenerWiringTest` |

@@ -107,15 +107,18 @@ public final class EngagementMessageHandler {
     private void onEvent(EngagementStateUpdateEvent event) {
         String engagementId = event.engagementId();
         String outcome = history.append(HistoryEntry.of(event)) ? "appended" : "duplicate";
+        // Each removal is conditional, so a redelivered decision never erases an offer built after it.
         switch (event.type()) {
-            // The accepted version replaces the offer's starting point; an archived engagement gets no offer.
-            case ACCEPTED, ARCHIVED -> pendingUpdates.removeOffer(engagementId);
+            // The accepted version is the new starting point: only an offer built from an older one is obsolete.
+            case ACCEPTED -> pendingUpdates.removeOfferStartingBefore(engagementId, event.appliedVersion());
             // A decline only covers the version the user saw: a newer offer published meanwhile stays.
             case DECLINED ->
                 pendingUpdates.removeOfferUpTo(engagementId, Objects.requireNonNull(event.declinedVersion()));
+            // An archived engagement gets no offer.
+            case ARCHIVED -> pendingUpdates.removeOffer(engagementId);
             case CREATED, SYNCED -> {}
         }
-        log.info("outcome={} type={} engagementId={} region={}", outcome, event.type(), engagementId, region);
+        log.info("outcome={} engagementId={} region={}", outcome, engagementId, region);
     }
 
     private void onSyncRequest(SyncRequest request) throws InterruptedException {

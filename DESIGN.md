@@ -80,7 +80,7 @@
 - **Evaluation:** offline, the gold set (§2) must pass before any prompt or model change ships. Online, we track the pass rate, the fallback rate and a reviewed weekly sample.
 
 ### Key tradeoffs
-- **Offers only on publish:** events and syncs only record history; decisions remove obsolete offers. Rare gaps (an engagement created mid-publish, an older offer accepted) wait for the next publish.
+- **Offers only on publish:** events and syncs only record history; decisions remove obsolete offers. Rare gaps (an engagement created mid-publish or recovered by the nightly sync, an older offer accepted) wait for the next publish.
 - **A derived store**, not an extension of engagement-service: we own the build and see across firms, at the cost of a sync and drift risk.
 - **SQS idempotency** (a visibility timeout, plus skipping the load if history exists), not a claim table. **Two queues**, so decisions never wait behind 1-minute loads.
 
@@ -111,7 +111,7 @@ sequenceDiagram
   UP->>DB: remove the offer the decision made obsolete
 ```
 
-- CREATED and ARCHIVED join at step 9 (ARCHIVED removes the offer). A decline removes the offer only up to the declined version.
+- CREATED and ARCHIVED join at step 9 (ARCHIVED removes the offer). Decisions remove only offers they make obsolete, so a redelivered one can't erase a newer offer.
 
 **B. Template publish (including withdrawal)**
 

@@ -81,6 +81,17 @@ class InMemoryUpdateDatabaseTest {
         assertThat(db.offer(ENGAGEMENT)).isEmpty();
     }
 
+    @Test
+    void removeOfferStartingBeforeKeepsAnOfferBuiltFromThatVersion() {
+        db.putOffer(ENGAGEMENT, 6, 8);
+
+        db.removeOfferStartingBefore(ENGAGEMENT, 6); // a replayed acceptance of v6
+        assertThat(db.offer(ENGAGEMENT)).hasValue(new InMemoryUpdateDatabase.Offer(6, 8));
+
+        db.removeOfferStartingBefore(ENGAGEMENT, 7);
+        assertThat(db.offer(ENGAGEMENT)).isEmpty();
+    }
+
     private static HistoryEntry row(Instant at, EngagementEventType type, long applied, Long declined) {
         return new HistoryEntry(ENGAGEMENT, at, type, "firm-1", PRODUCT, applied, declined, null, null);
     }

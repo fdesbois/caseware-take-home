@@ -172,7 +172,23 @@ class EngagementMessageHandlerTest {
     }
 
     @Test
-    @DisplayName("6. a message for another region goes to the DLQ: no load, no write")
+    @DisplayName("6. a redelivered acceptance does not erase the offer a later publish built from it")
+    void redeliveredAcceptanceKeepsTheNewerOffer() throws Exception {
+        EngagementMessageHandler handler = handler(20);
+        EngagementStateUpdateEvent acceptedV6 = event("eng-1", EngagementEventType.ACCEPTED, 6, null, T0);
+        db.putOffer("eng-1", 4, 6);
+
+        handler.handle(acceptedV6);
+        assertThat(db.offer("eng-1")).isEmpty();
+
+        db.putOffer("eng-1", 6, 8); // the next publish offers v6 → v8
+        handler.handle(acceptedV6); // SQS delivers the acceptance again
+
+        assertThat(db.offer("eng-1")).hasValue(new Offer(6, 8));
+    }
+
+    @Test
+    @DisplayName("7. a message for another region goes to the DLQ: no load, no write")
     void regionMismatchGoesToTheDeadLetterQueue() throws Exception {
         EngagementMessageHandler handler = handler(20);
         db.putOffer("eng-2", 4, 8);

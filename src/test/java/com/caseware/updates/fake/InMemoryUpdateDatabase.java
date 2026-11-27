@@ -62,6 +62,11 @@ public final class InMemoryUpdateDatabase implements EngagementHistoryRepository
         offers.computeIfPresent(engagementId, (id, offer) -> offer.toVersion() <= version ? null : offer);
     }
 
+    @Override
+    public void removeOfferStartingBefore(String engagementId, long appliedVersion) {
+        offers.computeIfPresent(engagementId, (id, offer) -> offer.fromVersion() < appliedVersion ? null : offer);
+    }
+
     /** Writes an offer the way the publish fan-out would; tests use it to set up the table. */
     public void putOffer(String engagementId, long fromVersion, long toVersion) {
         offers.put(engagementId, new Offer(fromVersion, toVersion));
