@@ -6,11 +6,8 @@ import static com.caseware.updates.model.EngagementEventType.DECLINED;
 import static com.caseware.updates.model.EngagementEventType.SYNCED;
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.caseware.updates.model.DecisionBasis;
 import com.caseware.updates.model.EngagementEventType;
 import com.caseware.updates.model.HistoryEntry;
-import com.caseware.updates.model.PendingDecision;
-import com.caseware.updates.model.PendingUpdate;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
@@ -64,85 +61,38 @@ class InMemoryUpdateDatabaseTest {
     }
 
     @Test
-    void applyIfUnchangedWritesWhenNothingMoved() {
-        db.publishVersion(PRODUCT, 8);
-        db.append(row(T0, CREATED, 4, null));
+    void removeOfferDeletesAnyOffer() {
+        db.putOffer(ENGAGEMENT, 4, 8);
 
-        assertThat(db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0), basisNow())).isTrue();
-        assertThat(db.pendingUpdate(ENGAGEMENT)).hasValueSatisfying(o -> assertThat(o.toVersion()).isEqualTo(8));
+        db.removeOffer(ENGAGEMENT);
+        db.removeOffer(ENGAGEMENT); // idempotent
+
+        assertThat(db.offer(ENGAGEMENT)).isEmpty();
     }
 
     @Test
-    void applyIfUnchangedSkipsTheWriteOnceHistoryMoved() {
-        db.publishVersion(PRODUCT, 8);
-        db.append(row(T0, CREATED, 4, null));
-        DecisionBasis basis = basisNow();
+    void removeOfferUpToDeletesOnlyAnOfferUpToThatVersion() {
+        db.putOffer(ENGAGEMENT, 4, 8);
 
-        db.append(row(T0.plusSeconds(1), ACCEPTED, 8, null));
+        db.removeOfferUpTo(ENGAGEMENT, 7); // a decline of v7: the newer v8 offer stays
+        assertThat(db.offer(ENGAGEMENT)).hasValue(new InMemoryUpdateDatabase.Offer(4, 8));
 
-        assertThat(db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0), basis)).isFalse();
-        assertThat(db.pendingUpdate(ENGAGEMENT)).isEmpty();
+        db.removeOfferUpTo(ENGAGEMENT, 8);
+        assertThat(db.offer(ENGAGEMENT)).isEmpty();
     }
 
     @Test
-    void applyIfUnchangedSkipsTheWriteOnceAnOlderRowRaisesTheMaxDeclinedVersion() {
-        db.publishVersion(PRODUCT, 8);
-        db.append(row(T0.plusSeconds(10), SYNCED, 4, null));
-        DecisionBasis basis = basisNow();
+    void removeOfferStartingBeforeKeepsAnOfferBuiltFromThatVersion() {
+        db.putOffer(ENGAGEMENT, 6, 8);
 
-        db.append(row(T0, DECLINED, 4, 8L)); // older than the latest row, so only the max declined version moves
+        db.removeOfferStartingBefore(ENGAGEMENT, 6); // a replayed acceptance of v6
+        assertThat(db.offer(ENGAGEMENT)).hasValue(new InMemoryUpdateDatabase.Offer(6, 8));
 
-        assertThat(db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0), basis)).isFalse();
-    }
-
-    @Test
-    void applyIfUnchangedSkipsTheWriteOnceTheProductVersionMoved() {
-        db.publishVersion(PRODUCT, 8);
-        db.append(row(T0, CREATED, 4, null));
-        DecisionBasis basis = basisNow();
-
-        db.publishVersion(PRODUCT, 9);
-
-        assertThat(db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0), basis)).isFalse();
-    }
-
-    @Test
-    void noOfferDeletesTheRow() {
-        db.publishVersion(PRODUCT, 8);
-        db.append(row(T0, CREATED, 4, null));
-        db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0), basisNow());
-
-        assertThat(db.applyIfUnchanged(ENGAGEMENT, new PendingDecision.NoOffer(), basisNow())).isTrue();
-        assertThat(db.pendingUpdate(ENGAGEMENT)).isEmpty();
-    }
-
-    @Test
-    void anUnchangedOfferKeepsItsOfferedAtAndAChangedOneReplacesIt() {
-        db.publishVersion(PRODUCT, 8);
-        db.append(row(T0, CREATED, 4, null));
-        db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0), basisNow());
-
-        db.applyIfUnchanged(ENGAGEMENT, offer(4, 8, T0.plusSeconds(60)), basisNow());
-        assertThat(db.pendingUpdate(ENGAGEMENT)).hasValueSatisfying(o -> assertThat(o.offeredAt()).isEqualTo(T0));
-
-        db.publishVersion(PRODUCT, 9);
-        db.applyIfUnchanged(ENGAGEMENT, offer(4, 9, T0.plusSeconds(120)), basisNow());
-        assertThat(db.pendingUpdate(ENGAGEMENT)).hasValueSatisfying(o -> {
-            assertThat(o.toVersion()).isEqualTo(9);
-            assertThat(o.offeredAt()).isEqualTo(T0.plusSeconds(120));
-        });
-    }
-
-    private DecisionBasis basisNow() {
-        return new DecisionBasis(db.currentState(ENGAGEMENT), db.latestVersion(PRODUCT));
+        db.removeOfferStartingBefore(ENGAGEMENT, 7);
+        assertThat(db.offer(ENGAGEMENT)).isEmpty();
     }
 
     private static HistoryEntry row(Instant at, EngagementEventType type, long applied, Long declined) {
         return new HistoryEntry(ENGAGEMENT, at, type, "firm-1", PRODUCT, applied, declined, null, null);
-    }
-
-    private static PendingDecision offer(long from, long to, Instant offeredAt) {
-        return new PendingDecision.Offer(new PendingUpdate(
-                ENGAGEMENT, "firm-1", PRODUCT, from, to, "summaries/" + PRODUCT + "/" + from + "-" + to, offeredAt));
     }
 }

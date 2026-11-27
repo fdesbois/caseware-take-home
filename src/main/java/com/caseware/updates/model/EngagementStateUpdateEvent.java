@@ -32,5 +32,11 @@ public record EngagementStateUpdateEvent(
         Objects.requireNonNull(region, "region");
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(sourceUpdatedAt, "sourceUpdatedAt");
+        if (type == EngagementEventType.SYNCED) {
+            throw new IllegalArgumentException("SYNCED rows come from loads, never from engagement-service events");
+        }
+        if (type == EngagementEventType.DECLINED && declinedVersion == null) {
+            throw new IllegalArgumentException("a DECLINED event needs its declinedVersion");
+        }
     }
 }

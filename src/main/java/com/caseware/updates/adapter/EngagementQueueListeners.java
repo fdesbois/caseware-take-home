@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component;
 /**
  * The two SQS listeners, one per queue, both handing their message to the same handler. Returning acknowledges
  * (deletes) the message; throwing leaves it to be redelivered, and the queue's DLQ takes over after
- * {@code maxReceiveCount}. Both hide a received message for longer than a load or a summary can take.
+ * {@code maxReceiveCount}. Both hide a received message for longer than a load can take.
  */
 @Component
 class EngagementQueueListeners {
