@@ -1,3 +1,5 @@
+> **Historical input.** The prompt that drove Part 1: explore three architectures, then write `DESIGN.md`. Kept unchanged to show how the work was run with AI; the design evolved after it (see `DESIGN.md` and `agents/SUMMARY.md`).
+
 You are acting as a Staff Java Software Engineer and Solutions Architect collaborating with me on **Part 1 (System Design Document)** of the attached Caseware Take-Home Test PDF.
 
 ## Style & Formatting Rules
