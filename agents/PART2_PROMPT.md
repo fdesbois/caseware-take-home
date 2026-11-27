@@ -9,7 +9,7 @@ You are implementing **Part 2** of the Caseware take-home (`context/Staff_Java_D
   - `pending_update(engagement_id PK, firm_id, product_id, from_version, to_version, summary_key, offered_at)`: the current offer, deleted once it no longer applies.
 - Two SQS queues, each with its own DLQ:
   - `engagement-events`: `EngagementStateUpdateEvent(engagementId, firmId, productId, region, type, appliedVersion, declinedVersion?, summaryKey?, actorId?, sourceUpdatedAt)`, published by engagement-service with the full state.
-  - `engagement-sync`: `SyncRequest(engagementId, region, enqueuedAt)`, published nightly by a cron for engagements missing from history (its first run is the ~800k backfill).
+  - `engagement-sync`: `SyncRequest(engagementId, region)`, published nightly by a cron for engagements with no history row, at most ~100k per run (one day of loads), so the ~800k backfill spreads over ~8 nights.
 - `EngagementClient.load` takes ~1 minute, and the owning team allows **80 concurrent loads per region** (4 pods × 20 permits).
 - `SummaryClient.summarize(productId, from, to)` returns `Ready(summaryKey)` or `EmptyDiff`, and can take 30–60 s.
 
@@ -17,7 +17,7 @@ You are implementing **Part 2** of the Caseware take-home (`context/Staff_Java_D
 - **Listeners**: two `@SqsListener` methods (Spring Cloud AWS, Boot 4 compatible), one per queue, each one line calling `EngagementMessageHandler.handle(EngagementMessage)`. `engagement-sync`: `maxConcurrentMessages` = permits per pod, `messageVisibilitySeconds = 300`.
 - **Handler**: `sealed interface EngagementMessage permits EngagementStateUpdateEvent, SyncRequest`, dispatched with a pattern-matching `switch`:
   - Event: append the history row (duplicate primary key = no-op), then `evaluatePending`.
-  - Sync request: skip the load if history already has a row with `source_updated_at ≥ enqueuedAt`. Otherwise take a permit, `loadStartedAt = clock.instant()`, `load`, release the permit, append a SYNCED row with `source_updated_at = loadStartedAt`. Then **always** `evaluatePending` (even when the load was skipped, so a redelivery after a later failure still creates the offer).
+  - Sync request: skip the load if history already has any row for this engagement (the cron only queues engagements with none, so a row means an event or an earlier sync already gave us the state). Otherwise take a permit, `loadStartedAt = clock.instant()`, `load`, release the permit, append a SYNCED row with `source_updated_at = loadStartedAt`. Then **always** `evaluatePending` (even when the load was skipped, so a redelivery after a later failure still creates the offer).
 - **`evaluatePending(engagementId)`**: read the current state and the product's latest version, then a pure, separately tested decision function:
   - No offer (delete the row): no state, ARCHIVED, `latest ≤ applied`, or `latest ≤ max(declined_version)`.
   - Otherwise `summarize(applied, latest)`: `EmptyDiff` → delete; `Ready` → upsert offer `applied → latest`.
@@ -27,10 +27,15 @@ You are implementing **Part 2** of the Caseware take-home (`context/Staff_Java_D
   - Transient (timeout, 429, 5xx): throw, so SQS redelivers; the DLQ takes over after `maxReceiveCount`.
   - Permanent (404, malformed): `DeadLetterPublisher.publish(message, code)`, then return normally.
 - **Region**: message region ≠ configured region → DLQ, no load, no write.
-- **Idempotency**: no claim table, no extra store. SQS visibility timeout (300 s) > load timeout (120 s), plus the "row since `enqueuedAt`" check. A rare concurrent duplicate costs one extra load, never a wrong result.
+- **Idempotency**: no claim table, no extra store. SQS visibility timeout (300 s) > load timeout (120 s), plus the "any history row → skip the load" check. A rare concurrent duplicate costs one extra load, never a wrong result.
 - **Observability**: Micrometer counters per outcome (`loaded`, `skipped`, `transient`, `permanent`, `stale_write_skipped`) and a gauge of loads in flight. Logs carry only opaque IDs, region and outcome.
 - **Time**: inject `Clock`; never call `Instant.now()`.
 - **Ports** (interfaces only; thread-safe in-memory fakes in tests): `EngagementHistoryRepository`, `ProductVersionRepository`, `PendingUpdateRepository`, `SummaryClient`, `EngagementClient`, `DeadLetterPublisher`.
+- **No SQL anywhere in this code.** The in-memory fakes are the reference implementation of the port contracts:
+  - append is idempotent on `(engagementId, sourceUpdatedAt, eventType)`;
+  - the current state is the latest row by `sourceUpdatedAt` plus the max declined version;
+  - `hasAnyEntry(engagementId)` reports whether any row exists;
+  - `applyIfUnchanged` is a compare-and-set.
 - **Config**: validated `@ConfigurationProperties` record (region, permitsPerPod > 0, loadTimeout < visibility timeout).
 
 ## Out of scope (ports only; list them in the README)
