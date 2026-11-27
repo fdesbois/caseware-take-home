@@ -2,13 +2,13 @@
 
 ## 1. Scope / Context
 
-**Problem.** An engagement file is created from a product template (zipped JSON) and stays on that version. Each template update has to be accepted or declined, engagement by engagement. Users need to see at a glance which engagements have an update pending, with a human-readable summary.
+**Problem.** An engagement file is created from a product template (zipped JSON) and stays on that version. Users accept or decline each update per engagement, so they need to see at a glance which engagements have one pending, with a human-readable summary.
 
 **Scale.** 4,000 firms · 800,000 active engagements · 40 products · median firm ~40 engagements, largest ~40,000 · ~1 publish per product per week ≈ 173/month.
 
 **Hard constraints**
 - Reading an engagement's template version means loading it: **~1 min each**, on a system another team owns with limited capacity.
-- The template DB is shared and holds no engagement data. Engagements live in customer DBs, and some firms must keep their data in the **EU or Canada**.
+- The template DB is shared and has no engagement data; engagements live in customer DBs, some required to stay in the **EU or Canada**.
 - All systems are live: no maintenance window, and **existing** engagements must be covered.
 - Versions branch, get withdrawn, and pile up before a decision. A firm that declined v5 may later be offered v7, which contains v5.
 - All-in cost must stay under $X/month, including inference. A summary shown in March must hold up in a review in November.
@@ -31,13 +31,18 @@
 - Client data stays in its region; every decision traces to the exact summary shown; the load budget is never exceeded.
 - **Non-goals:** offers within seconds of a publish (§5); owning decisions (engagement-service stays the system of record).
 
-## 3. Design
+**Delivery approach**
+- **Hidden until complete:** the UI stays off until the backfill covers every existing engagement, so there's no partial or "checking" state.
+- **Gold set from the backfill:** summaries for publishes during the ~8-night backfill are generated unseen; the content team reviews them into a **gold set** that every prompt or model change must pass.
+- **Pilot before everyone:** one firm (ideally one per region) uses it for 2–3 publishes; its auditors, who would defend a decision in a review, validate the wording.
 
-See `Caseware Architecture.drawio.png`
+## 3. Design
 
 ### Architecture
 
-- `*` marks an existing service. Each one adds a single event through a **transactional outbox**: the event is saved in the same transaction as the change it reports.
+![Architecture](Caseware%20Architecture.drawio.png)
+
+- Existing services (`*`) publish their event right after each commit, with retries; lost events are covered under Correctness.
 - **update-service** (one per region) owns version history and offers. **summary-service** (global, no database) owns summaries. The only thing that leaves a region is `(product, from, to)`.
 
 ### Data ownership & model
@@ -57,7 +62,7 @@ See `Caseware Architecture.drawio.png`
 
 **Version rules**
 - An update is pending when the engagement isn't archived, `latest > applied`, and `latest > max(declined)`.
-- **Pile-up:** if v5 to v7 all land before a decision, there is one offer `v4 → v7`, replaced in place. Replacing an offer doesn't count as declining it.
+- **Pile-up:** v5 to v7 landing before a decision give one offer `v4 → v7`, replaced in place; replacing is not declining.
 - **Declined:** the engagement keeps its applied version, and offers stop until a version newer than the declined one arrives. v7 then comes as `v4 → v7`, which includes v5's changes.
 - **Withdrawal (A2):** for an engagement on v6, `v6 → v8` is `EMPTY_DIFF`, so the offer is removed and no decision is recorded. For one on v7, `v7 → v8` reads "withdraws v7".
 
@@ -65,14 +70,14 @@ See `Caseware Architecture.drawio.png`
 - **Duplicates:** the history primary key, the forward-only version upsert, and offer writes that are safe to repeat.
 - **Order:** the latest `source_updated_at` wins. Sync rows carry the time their load *started*, so a decision made during the 1-minute load wins.
 - **Races:** an offer is written only if the history row and product version it was computed from are still current (compare-and-set). Otherwise the newer change re-evaluates it.
-- **Loss:** outboxes, alarms on the dead-letter queues (DLQs), and the nightly sync of engagements with no history.
+- **Loss:** events are sent after commit with retries (no outbox). The nightly job re-queues engagements without history and any missed publish; a lost decision is re-emitted when the user acts on the stale offer (idempotent decision endpoint); dead-letter queues (DLQs) have alarms.
 
 ### Summary generation & evaluation
 - **One summary per `(product, from, to, promptVersion)`**, shared by every firm and region. Cost follows the number of version pairs (~20 per publish), not engagements. Each summary is written once, so every region shows the same text.
-- **Pipeline:** get the JSON diff. If it's empty, return `EMPTY_DIFF` without calling the LLM. Otherwise, Claude on Bedrock (pinned model, versioned prompt, template data only) returns `{text, changeType, diffPaths[]}` for each bullet.
+- **Pipeline:** get the JSON diff. If it's empty, return `EMPTY_DIFF` without calling the LLM. Otherwise, Claude Sonnet on Bedrock (pinned model, versioned prompt, template data only) returns `{text, changeType, diffPaths[]}` for each bullet.
 - **Validator (code):** every cited path exists, every changed path is cited, and each change type matches the diff. After two failures, the summary falls back to a labelled plain rendering of the diff, so an offer is never blocked.
 - **Audit:** S3 Object Lock keeps the text, bullets, diff hash, model, prompt version and validator result for the audit period. Summaries are never regenerated; a new prompt or model writes new keys. Each decision row keeps `summary_key` and `actor_id`.
-- **Evaluation:** offline, a gold set reviewed by the content team and then the pilot firm must pass before any prompt or model change ships. Online, we track the pass rate, the fallback rate and a reviewed weekly sample.
+- **Evaluation:** offline, the gold set (§2) must pass before any prompt or model change ships. Online, we track the pass rate, the fallback rate and a reviewed weekly sample.
 
 ### Key tradeoffs
 - **A derived store**, not an extension of engagement-service. We own the build and can see across firms; the cost is a sync and a risk of drift.
@@ -99,15 +104,15 @@ sequenceDiagram
   UP-->>UI: offer + summary text (via summary-service)
   U->>UI: accept or decline
   UI->>ES: decision (engagementId, toVersion, summaryKey)
-  ES->>ES: process decision + outbox row, same transaction
-  ES-->>Q: EngagementStateUpdateEvent (full state)
+  ES->>ES: commit the decision
+  ES-->>Q: EngagementStateUpdateEvent (current version), retried
   Q->>UP: at-least-once delivery
   UP->>DB: append history row (duplicate = no-op)
   UP->>UP: evaluatePending
   UP->>DB: delete or replace the offer (compare-and-set)
 ```
 
-- CREATED and ARCHIVED events join at step 9. Accepting an older offer while a newer version exists gives a new offer from the accepted version.
+- CREATED and ARCHIVED events join at step 9. Accepting an older offer while a newer version exists yields a new offer from the accepted version.
 
 **B. Template publish (including withdrawal)**
 
@@ -121,9 +126,9 @@ sequenceDiagram
   participant DB as update-db
   participant SS as summary-service
   participant S3 as summary bucket
-  participant LLM as Claude (Bedrock)
-  TS->>TS: publish vN + outbox row, same transaction
-  TS-->>SNS: ProductVersionUpdateEvent (product, vN, reason)
+  participant LLM as Claude Sonnet (Bedrock)
+  TS->>TS: commit vN
+  TS-->>SNS: ProductVersionUpdateEvent (product, vN, reason), retried
   SNS-->>Q: fan-out to EU, CA, US
   Q->>UP: deliver
   UP->>DB: forward-only upsert of product_header_version
@@ -151,10 +156,17 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant CJ as nightly CronJob
+  participant TS as template-service
+  participant QP as product-events
   participant QS as engagement-sync
   participant ES as engagement-service
   participant DB as update-db
   participant UP as update-service
+  CJ->>TS: latest version of each product (~40)
+  CJ->>DB: compare with product_header_version
+  opt a publish was missed
+    CJ->>QP: re-queue ProductVersionUpdateEvent (flow B)
+  end
   CJ->>QS: any message left?
   alt queue not empty
     CJ-->>CJ: skip tonight
@@ -173,13 +185,13 @@ sequenceDiagram
 ```
 
 - The first runs are the backfill; later runs check completeness (`sync.missing` should be 0).
-- 100k is about one day of loads, so each run starts with an empty queue. An engagement stuck in the DLQ still has no history, so the next run queues it again.
+- 100k ≈ one day of loads, so each run starts on an empty queue; an engagement stuck in the DLQ is still missing, so the next run re-queues it.
 
 ## 5. Risks
 
 **Challenged requirement: "within seconds of a template being published."** Instead, an offer appears with its validated summary, within 5 minutes at p95. Updates are weekly and decisions take days; an unexplained offer can't be decided or defended, and seconds would mean showing unvalidated text.
 
-**Riskiest component: whether `engagement_history` is complete.** A missing or stale row silently shows "no update". Users can't see it, and it's the worst thing an audit could find. Defences: the Correctness rules, events that carry the full state, the `sync.missing` alert, and spot-checks during the pilot.
+**Riskiest component: completeness of `engagement_history`.** A missing or outdated row hides a pending update without any visible error. Mitigations: the Correctness rules (§3), version-carrying events, the `sync.missing` alert, and pilot spot-checks.
 
 | Failure | Mitigation |
 |---|---|
@@ -195,11 +207,11 @@ sequenceDiagram
 | Backfill compute | 800k × ~$0.001 per load (1 vCPU·min + 4 GB·min) | ≈ $0.8k one-time |
 | Publish fan-out | ~20 version groups (max 52), 8 summaries in parallel × ~30 s | 1.5–3.5 min |
 | Summaries | 173 publishes × 20–52 pairs | 3.5k–9k / month |
-| LLM | 20k input + 1.5k output tokens at $4 / $20 per million ≈ $0.11 | $0.4–1.0k / month (≈ $390k if summarised per engagement) |
+| LLM (Sonnet) | 20k input + 1.5k output tokens at $2 / $10 per million ≈ $0.055 | $0.2–0.5k / month (≈ $190k if summarised per engagement) |
 | Storage | 800k × ~10 rows/yr × 150 B; 9k × 100 KB/month | ≈ 1.2 GB/yr in RDS; ≈ 1 GB/month in S3 |
 | Messaging | Events and sync requests | < 1 msg/s, < $10 / month |
 
-**Run cost ≈ $5–6k/month:** 3 × RDS SQL Server Multi-AZ ≈ $4.3k (mostly licences), LLM $0.4–1.0k, EKS ≈ $0.3k, SQS/SNS/S3 < $0.1k. If $X is tight, cut the database tier (Web or Express edition, or a shared instance) before the model. 
+**Run cost ≈ $5k/month:** 3 × RDS SQL Server Multi-AZ ≈ $4.3k (mostly licences), LLM $0.2–0.5k, EKS ≈ $0.3k, SQS/SNS/S3 < $0.1k. If $X is tight, cut the database tier (Web or Express edition, or a shared instance) before the model. 
 
 | SLO / alert | Target |
 |---|---|
@@ -218,24 +230,22 @@ Alerts also fire on any DLQ message and on the daily LLM budget. Logs and metric
 |---|---|
 | Region | EU / CA / US; messages for other regions go to the DLQ |
 | Sync permits per pod × pods | 20 × 4 = 80 (A4) |
-| Load timeout / visibility timeout | 120 s / 300 s |
+| Load timeout / visibility timeout / `maxReceiveCount` | 120 s / 300 s / 5, then the DLQ |
 | Sync cap / schedule | 100k per run / 02:00 local time, runs never overlap |
-| SQS `maxReceiveCount` | 5, then the DLQ |
 | Summary parallelism / validator retries | 8 per publish / 2 |
 | Model ID / prompt version | Pinned / versioned; changing either writes new keys |
 | Flags | `pending-updates.ui` per firm; emitters per region |
 
 ## 8. Rollout
 
-1. **Deploy, hidden.** All stacks go live with the UI flag off, versions seeded, and emitters turned on region by region. Summaries are generated but not shown, to build the gold set.
-2. **Turn on the nightly sync.** Its first runs are the backfill, and offers appear as engagements sync. This step is done when `sync.missing` = 0.
-3. **Pilot firm** (one per region if possible). Turn the UI on for 2–3 publishes; the firm's auditors check the wording.
-4. **Everyone.** Turn the UI on for all firms.
+1. **Deploy, hidden.** All stacks go live with the UI flag off, versions seeded, and emitters turned on region by region.
+2. **Turn on the nightly sync.** Its first runs are the backfill, and offers appear as engagements sync. Done when `sync.missing` = 0 and the gold set is reviewed.
+3. **Pilot firm.** UI on for 2–3 publishes. Done when the pilot signs off on the wording.
+4. **Everyone.** UI on for all firms.
 
-- **No downtime:** every change is additive. Rollback means turning the UI flag off, and update-db can be rebuilt by the sync.
-- **Evolution:** versioned events only gain fields, prompt and model changes must pass the gold set, and a new region is one more regional stack.
+- Every change is additive, so there is no downtime; rollback is the UI flag, and update-db can be rebuilt by the sync. Events are versioned and only gain fields; a new region is one more regional stack.
 
 ## 9. Rejected
 
-- **Re-check every engagement on every publish.** 3.46M loads a month needs at least 80 loads in parallel forever and ~4 h per publish, which breaks the capacity limit and freshness. Stacked per-version summaries also misstate the net change.
-- **engagement-service stores the version in each customer DB.** Strongest consistency, but the capacity-limited engagement team would build it, ~4,000 live databases would need schema changes, and there would be no view across firms.
+- **Re-check every engagement on every publish.** 3.46M loads/month needs ≥ 80 loads in parallel forever and ~4 h per publish, breaking capacity and freshness; stacked per-version summaries misstate the net change.
+- **engagement-service stores the version in each customer DB.** Strongest consistency, but the capacity-limited team builds it, ~4,000 live DBs need schema changes, and there's no cross-firm view.
