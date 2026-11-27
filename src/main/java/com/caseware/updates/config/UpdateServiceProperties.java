@@ -14,6 +14,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param loadTimeout how long the engagement-service adapter waits for one load before giving up
  * @param visibilityTimeoutSeconds how long SQS hides a received message; longer than a load, so a message is not
  *     delivered again while its load is still running
+ * @param eventsMaxInFlight events processed at once per pod; each may wait 30–60 s on a summary, so it is set
+ *     explicitly instead of relying on the library default
  */
 @ConfigurationProperties("update-service")
 public record UpdateServiceProperties(
@@ -21,6 +23,7 @@ public record UpdateServiceProperties(
         int permitsPerPod,
         Duration loadTimeout,
         int visibilityTimeoutSeconds,
+        int eventsMaxInFlight,
         String eventsQueue,
         String syncQueue) {
 
@@ -31,6 +34,10 @@ public record UpdateServiceProperties(
         requireText(syncQueue, "update-service.sync-queue");
         if (permitsPerPod <= 0) {
             throw new IllegalArgumentException("update-service.permits-per-pod must be > 0, was " + permitsPerPod);
+        }
+        if (eventsMaxInFlight <= 0) {
+            throw new IllegalArgumentException(
+                    "update-service.events-max-in-flight must be > 0, was " + eventsMaxInFlight);
         }
         if (!loadTimeout.isPositive()) {
             throw new IllegalArgumentException("update-service.load-timeout must be > 0, was " + loadTimeout);

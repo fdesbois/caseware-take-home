@@ -32,6 +32,14 @@ class UpdateServicePropertiesTest {
     }
 
     @Test
+    void requiresAtLeastOneEventInFlight() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new UpdateServiceProperties(
+                        Region.EU, 20, LOAD_TIMEOUT, 300, 0, "engagement-events", "engagement-sync"))
+                .withMessageContaining("events-max-in-flight");
+    }
+
+    @Test
     void requiresTheLoadTimeoutToEndBeforeTheVisibilityTimeout() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> properties(Region.EU, 20, Duration.ofSeconds(300), 300))
@@ -41,6 +49,12 @@ class UpdateServicePropertiesTest {
     private static UpdateServiceProperties properties(
             Region region, int permitsPerPod, Duration loadTimeout, int visibilityTimeoutSeconds) {
         return new UpdateServiceProperties(
-                region, permitsPerPod, loadTimeout, visibilityTimeoutSeconds, "engagement-events", "engagement-sync");
+                region,
+                permitsPerPod,
+                loadTimeout,
+                visibilityTimeoutSeconds,
+                50,
+                "engagement-events",
+                "engagement-sync");
     }
 }

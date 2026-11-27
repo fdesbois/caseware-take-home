@@ -10,6 +10,7 @@ import com.caseware.updates.fake.RecordingDeadLetterPublisher;
 import io.awspring.cloud.sqs.listener.MessageListenerContainerRegistry;
 import io.awspring.cloud.sqs.listener.SqsContainerOptions;
 import io.awspring.cloud.sqs.listener.SqsMessageListenerContainer;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
@@ -43,7 +44,7 @@ class SqsListenerWiringTest {
 
         @Bean
         FakeEngagementClient engagementClient() {
-            return new FakeEngagementClient();
+            return new FakeEngagementClient(Clock.systemUTC());
         }
 
         @Bean
@@ -74,6 +75,7 @@ class SqsListenerWiringTest {
         SqsMessageListenerContainer<?> events = container("engagement-events");
 
         assertThat(events.getQueueNames()).containsExactly("engagement-events");
+        assertThat(events.getContainerOptions().getMaxConcurrentMessages()).isEqualTo(50);
         assertThat(events.getContainerOptions().getMessageVisibility()).isEqualTo(Duration.ofSeconds(300));
     }
 

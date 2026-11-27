@@ -42,13 +42,13 @@ public record HistoryEntry(
     }
 
     /**
-     * The row recording a loaded snapshot. It is stamped with the time the load started, so any event newer than
-     * the load wins.
+     * The row recording a loaded snapshot. It is stamped with engagement-service's read time, on the same clock as
+     * the events, so any decision made during the load wins.
      */
-    public static HistoryEntry synced(String engagementId, EngagementSnapshot snapshot, Instant loadStartedAt) {
+    public static HistoryEntry synced(String engagementId, EngagementSnapshot snapshot) {
         return new HistoryEntry(
                 engagementId,
-                loadStartedAt,
+                snapshot.readAt(),
                 EngagementEventType.SYNCED,
                 snapshot.firmId(),
                 snapshot.productId(),

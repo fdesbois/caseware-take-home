@@ -24,6 +24,7 @@ class EngagementQueueListeners {
     @SqsListener(
             id = "engagement-events",
             value = "${update-service.events-queue}",
+            maxConcurrentMessages = "${update-service.events-max-in-flight}",
             messageVisibilitySeconds = "${update-service.visibility-timeout-seconds}")
     void onEngagementEvent(EngagementStateUpdateEvent event) throws InterruptedException {
         handler.handle(event);

@@ -14,7 +14,6 @@ import com.caseware.updates.fake.RecordingDeadLetterPublisher;
 import com.caseware.updates.fake.RecordingDeadLetterPublisher.DeadLetter;
 import com.caseware.updates.model.EngagementEventType;
 import com.caseware.updates.model.EngagementMessage;
-import com.caseware.updates.model.EngagementSnapshot;
 import com.caseware.updates.model.EngagementStateUpdateEvent;
 import com.caseware.updates.model.LoadResult;
 import com.caseware.updates.model.Region;
@@ -45,9 +44,12 @@ class EngagementMessageHandlerTest {
     private static final Region REGION = Region.EU;
     private static final Instant T0 = Instant.parse("2026-03-02T02:00:00Z");
 
+    /** This pod's clock: the handler's. */
     private final MutableClock clock = new MutableClock(T0);
+    /** engagement-service's clock: stamps events and loaded snapshots. */
+    private final MutableClock engagementServiceClock = new MutableClock(T0);
     private final InMemoryUpdateDatabase db = new InMemoryUpdateDatabase();
-    private final FakeEngagementClient engagements = new FakeEngagementClient();
+    private final FakeEngagementClient engagements = new FakeEngagementClient(engagementServiceClock);
     private final FakeSummaryClient summaries = new FakeSummaryClient();
     private final RecordingDeadLetterPublisher deadLetters = new RecordingDeadLetterPublisher();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
@@ -124,12 +126,15 @@ class EngagementMessageHandlerTest {
         assertThat(outcome("transient")).isEqualTo(1);
         assertThat(outcome("permanent")).isEqualTo(1);
         assertThat(outcome("loaded")).isEqualTo(10);
+        assertThat(outcome("error")).isEqualTo(1); // the adapter crash
         assertThat(loadsInFlight()).isZero();
     }
 
     @Test
-    @DisplayName("4. out of order: a newer ACCEPTED handled before an older SYNCED stays the current state")
+    @DisplayName("4. out of order: a newer ACCEPTED beats an older SYNCED, even with the pod clock 10 min ahead")
     void newerEventWinsOverOlderSync() throws Exception {
+        // The SYNCED row must be ordered on engagement-service's clock: with the pod's, this pod would win.
+        clock.advance(Duration.ofMinutes(10));
         EngagementMessageHandler handler = handler(20);
         db.publishVersion(PRODUCT, 8);
         CountDownLatch loading = new CountDownLatch(1);
@@ -140,14 +145,14 @@ class EngagementMessageHandlerTest {
         });
 
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            // The load starts at T0 and reads the engagement on v4...
+            // engagement-service reads the engagement on v4 at T0 (its clock)...
             Future<Void> sync = executor.submit(() -> handle(handler, sync("eng-1")));
             await(loading);
-            // ...while the user accepts v8, and the load takes its minute.
+            // ...while the user accepts v8 at T0 + 30 s, and the load takes its minute.
             handler.handle(accepted("eng-1", 8, T0.plusSeconds(30)));
-            clock.advance(Duration.ofMinutes(1));
+            engagementServiceClock.advance(Duration.ofMinutes(1));
             finishLoad.countDown();
-            sync.get(10, SECONDS); // appends SYNCED stamped with the load's start (T0), older than the decision
+            sync.get(10, SECONDS); // appends SYNCED stamped T0 by engagement-service, older than the decision
         }
 
         assertThat(db.currentState("eng-1")).hasValueSatisfying(state -> {
@@ -211,6 +216,7 @@ class EngagementMessageHandlerTest {
         });
 
         assertThatThrownBy(() -> handler.handle(sync("eng-1"))).hasMessage("summary-service unavailable");
+        assertThat(outcome("error")).isEqualTo(1);
         assertThat(db.hasAnyEntry("eng-1")).isTrue();
         assertThat(db.pendingUpdate("eng-1")).isEmpty();
 
@@ -270,7 +276,7 @@ class EngagementMessageHandlerTest {
             engagements.duringLoad(id -> allPermits.await(10, SECONDS));
             List<Future<Void>> others = IntStream.range(0, permits)
                     .mapToObj(i -> {
-                        engagements.respond("eng-" + i, onVersion(8));
+                        engagements.respondOnVersion("eng-" + i, 8);
                         return executor.submit(() -> handle(handler, sync("eng-" + i)));
                     })
                     .toList();
@@ -335,10 +341,6 @@ class EngagementMessageHandlerTest {
 
     private static SyncRequest sync(String engagementId) {
         return new SyncRequest(engagementId, REGION);
-    }
-
-    private static LoadResult onVersion(long appliedVersion) {
-        return new LoadResult.Loaded(new EngagementSnapshot(FIRM, PRODUCT, appliedVersion, null));
     }
 
     private static EngagementStateUpdateEvent created(String engagementId, long appliedVersion, Instant at) {

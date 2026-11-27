@@ -26,19 +26,25 @@ public final class OfferRules {
      * an unpublished product, ARCHIVED, {@code latest ≤ applied}, or {@code latest ≤ max(declined)}.
      */
     public static Optional<Candidate> candidate(Optional<EngagementState> state, OptionalLong latestVersion) {
-        if (state.isEmpty() || latestVersion.isEmpty()) {
-            return Optional.empty();
-        }
-        HistoryEntry current = state.get().latest();
-        Long maxDeclined = state.get().maxDeclinedVersion();
-        long latest = latestVersion.getAsLong();
-        if (current.eventType() == EngagementEventType.ARCHIVED
-                || latest <= current.appliedVersion()
-                || (maxDeclined != null && latest <= maxDeclined)) {
-            return Optional.empty();
-        }
-        return Optional.of(new Candidate(
-                current.engagementId(), current.firmId(), current.productId(), current.appliedVersion(), latest));
+        return state.flatMap(current -> latestVersion.stream()
+                .boxed()
+                .findFirst()
+                .filter(latest -> isDue(current, latest))
+                .map(latest -> new Candidate(
+                        current.latest().engagementId(),
+                        current.latest().firmId(),
+                        current.latest().productId(),
+                        current.latest().appliedVersion(),
+                        latest)));
+    }
+
+    /** Not archived, behind the latest version, and the latest version is newer than anything declined. */
+    private static boolean isDue(EngagementState state, long latest) {
+        HistoryEntry current = state.latest();
+        Long maxDeclined = state.maxDeclinedVersion();
+        return current.eventType() != EngagementEventType.ARCHIVED
+                && latest > current.appliedVersion()
+                && (maxDeclined == null || latest > maxDeclined);
     }
 
     /** {@code EmptyDiff} → no offer (any existing one is deleted); {@code Ready} → offer the candidate's range. */

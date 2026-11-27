@@ -21,7 +21,6 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -38,7 +37,7 @@ import org.slf4j.LoggerFactory;
  */
 public final class EngagementMessageHandler {
 
-    /** Counter, tagged {@code outcome}: loaded, skipped, transient, permanent, stale_write_skipped. */
+    /** Counter, tagged {@code outcome}: loaded, skipped, transient, permanent, stale_write_skipped, error. */
     public static final String OUTCOMES = "updates.handler.outcomes";
 
     /** Gauge: loads currently holding a permit. */
@@ -60,6 +59,7 @@ public final class EngagementMessageHandler {
     private final Counter transientFailures;
     private final Counter permanentFailures;
     private final Counter staleWritesSkipped;
+    private final Counter errors;
 
     public EngagementMessageHandler(
             Region region,
@@ -89,6 +89,7 @@ public final class EngagementMessageHandler {
         this.transientFailures = outcomeCounter(meters, "transient");
         this.permanentFailures = outcomeCounter(meters, "permanent");
         this.staleWritesSkipped = outcomeCounter(meters, "stale_write_skipped");
+        this.errors = outcomeCounter(meters, "error");
         Gauge.builder(LOADS_IN_FLIGHT, loadPermits, permits -> permitsPerPod - permits.availablePermits())
                 .description("Engagement loads holding a permit")
                 .register(meters);
@@ -101,11 +102,25 @@ public final class EngagementMessageHandler {
     public void handle(EngagementMessage message) throws InterruptedException {
         if (message.region() != region) {
             deadLetter(message, "region_mismatch");
-            return;
+        } else {
+            dispatch(message);
         }
-        switch (message) {
-            case EngagementStateUpdateEvent event -> onEvent(event);
-            case SyncRequest request -> onSyncRequest(request);
+    }
+
+    /** Counts any unexpected failure (adapter bug, summary-service down) before SQS redelivers the message. */
+    private void dispatch(EngagementMessage message) throws InterruptedException {
+        try {
+            switch (message) {
+                case EngagementStateUpdateEvent event -> onEvent(event);
+                case SyncRequest request -> onSyncRequest(request);
+            }
+        } catch (TransientLoadException e) {
+            throw e; // already counted as transient
+        } catch (RuntimeException e) {
+            errors.increment();
+            log.warn("outcome=error exception={} engagementId={} region={}",
+                    e.getClass().getSimpleName(), message.engagementId(), region);
+            throw e;
         }
     }
 
@@ -122,10 +137,9 @@ public final class EngagementMessageHandler {
             skipped.increment();
             log.info("outcome=skipped engagementId={} region={}", engagementId, region);
         } else {
-            TimedLoad load = loadWithPermit(request);
-            switch (load.result()) {
+            switch (loadWithPermit(request)) {
                 case LoadResult.Loaded(EngagementSnapshot snapshot) -> {
-                    history.append(HistoryEntry.synced(engagementId, snapshot, load.startedAt()));
+                    history.append(HistoryEntry.synced(engagementId, snapshot));
                     loaded.increment();
                     log.info("outcome=loaded engagementId={} region={}", engagementId, region);
                 }
@@ -145,11 +159,10 @@ public final class EngagementMessageHandler {
     }
 
     /** The permit covers the load only, never summarize, so a slow summary cannot idle the load capacity. */
-    private TimedLoad loadWithPermit(SyncRequest request) throws InterruptedException {
+    private LoadResult loadWithPermit(SyncRequest request) throws InterruptedException {
         loadPermits.acquire();
         try {
-            Instant startedAt = clock.instant();
-            return new TimedLoad(startedAt, engagements.load(request.engagementId(), request.region()));
+            return engagements.load(request.engagementId(), request.region());
         } finally {
             loadPermits.release();
         }
@@ -190,6 +203,4 @@ public final class EngagementMessageHandler {
                 .tag("outcome", outcome)
                 .register(meters);
     }
-
-    private record TimedLoad(Instant startedAt, LoadResult result) {}
 }

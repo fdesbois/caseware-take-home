@@ -5,8 +5,8 @@ import java.util.Objects;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Published by engagement-service on {@code engagement-events} after every change, carrying the engagement's full
- * state, so the latest event alone describes the engagement.
+ * Published by engagement-service on {@code engagement-events} after every change. It carries the engagement's current
+ * template version (not just the change, never its content), so the latest event alone describes the engagement.
  *
  * @param summaryKey the summary the user saw, on ACCEPTED and DECLINED
  * @param actorId who made the decision, on ACCEPTED and DECLINED
