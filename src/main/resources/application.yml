@@ -4,3 +4,12 @@ spring:
   main:
     # No web server: keep the JVM up even when only daemon (virtual) threads are running.
     keep-alive: true
+
+update-service:
+  # region has no default: each deployment sets UPDATE_SERVICE_REGION (EU, CA or US). A deployment that forgets it
+  # fails to start, instead of sending all of its region's messages to the DLQ.
+  permits-per-pod: 20 # 4 pods × 20 = the 80 concurrent loads the engagement team allows per region
+  load-timeout: 120s
+  visibility-timeout-seconds: 300
+  events-queue: engagement-events
+  sync-queue: engagement-sync
