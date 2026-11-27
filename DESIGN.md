@@ -1,7 +1,5 @@
 # Pending Template Updates: Design
 
-Part 1 of the Caseware take-home. Diagrams are outside the 4-page budget.
-
 ## 1. Scope / Context
 
 **Problem.** An engagement file is created from a product template (zipped JSON) and stays on that version. Each template update has to be accepted or declined, engagement by engagement. Users need to see at a glance which engagements have an update pending, with a human-readable summary.
@@ -18,12 +16,12 @@ Part 1 of the Caseware take-home. Diagrams are outside the 4-page budget.
 **Assumptions**
 - A1. `product_id` = template + market branch, so each product has one increasing sequence of versions.
 - A2. A withdrawal is published as a new version (v8 restores v6's content).
-- A3. engagement-service can list engagement IDs without loading them, and its events carry the engagement's full state.
+- A3. engagement-service can list engagement IDs without loading them. Each of its events carries the engagement's current template version, not just the change, and never its content.
 - A4. The engagement team grants **80 concurrent loads per region**.
 - A5. Regions are EU, CA and US.
 - A6. Templates are not firm-specific, so one summary serves every firm and region.
 
-**Left out:** applying updates (PDF), notifications, admin endpoints, cross-branch moves, per-firm summaries, summary-service failover (an outage only delays offers).
+**Left out:** applying updates, notifications, admin endpoints, cross-branch moves, per-firm summaries, summary-service failover (an outage only delays offers).
 
 ## 2. Goals / Non-Goals
 
@@ -35,45 +33,9 @@ Part 1 of the Caseware take-home. Diagrams are outside the 4-page budget.
 
 ## 3. Design
 
-### Architecture
+See `Caseware Architecture.drawio.png`
 
-```mermaid
-flowchart TB
-  subgraph G["Global · template-derived data only"]
-    TS["template-service *"]
-    SNS[["SNS · ProductVersionUpdateEvent"]]
-    SS["summary-service (EKS)"]
-    S3[("summary bucket<br/>S3 · write-once · Object Lock")]
-    LLM{{"Claude on Amazon Bedrock"}}
-    TS -- "outbox" --> SNS
-    SS -- "JSON diff" --> TS
-    SS --> LLM
-    SS --> S3
-  end
-  subgraph R["Region ×3 · EU / CA / US · client data stays here"]
-    UI["Web UI"]
-    ES["engagement-service *"]
-    QE[["engagement-events + DLQ"]]
-    QP[["product-events + DLQ"]]
-    QS[["engagement-sync + DLQ"]]
-    CJ["nightly sync CronJob"]
-    UP["update-service (EKS)<br/>4 pods × 20 load permits"]
-    DB[("update-db<br/>RDS SQL Server")]
-    ES -- "EngagementStateUpdateEvent · outbox" --> QE
-    QE --> UP
-    QP --> UP
-    QS --> UP
-    CJ -- "list IDs" --> ES
-    CJ -- "IDs without history" --> QS
-    CJ -- "has history?" --> DB
-    UP -- "load ~1 min, ≤ 80" --> ES
-    UP --> DB
-    UI -- "pending updates" --> UP
-    UI -- "accept / decline + summary key" --> ES
-  end
-  SNS -- "fan-out" --> QP
-  UP -- "GET /summaries (product, from, to)" --> SS
-```
+### Architecture
 
 - `*` marks an existing service. Each one adds a single event through a **transactional outbox**: the event is saved in the same transaction as the change it reports.
 - **update-service** (one per region) owns version history and offers. **summary-service** (global, no database) owns summaries. The only thing that leaves a region is `(product, from, to)`.
@@ -237,7 +199,7 @@ sequenceDiagram
 | Storage | 800k × ~10 rows/yr × 150 B; 9k × 100 KB/month | ≈ 1.2 GB/yr in RDS; ≈ 1 GB/month in S3 |
 | Messaging | Events and sync requests | < 1 msg/s, < $10 / month |
 
-**Run cost ≈ $5–6k/month:** 3 × RDS SQL Server Multi-AZ ≈ $4.3k (mostly licences), LLM $0.4–1.0k, EKS ≈ $0.3k, SQS/SNS/S3 < $0.1k. If $X is tight, cut the database tier (Web or Express edition, or a shared instance) before the model. These are list prices; Bedrock's still need confirming.
+**Run cost ≈ $5–6k/month:** 3 × RDS SQL Server Multi-AZ ≈ $4.3k (mostly licences), LLM $0.4–1.0k, EKS ≈ $0.3k, SQS/SNS/S3 < $0.1k. If $X is tight, cut the database tier (Web or Express edition, or a shared instance) before the model. 
 
 | SLO / alert | Target |
 |---|---|
