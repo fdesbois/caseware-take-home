@@ -4,11 +4,10 @@ import static com.caseware.updates.fake.FakeEngagementClient.FIRM;
 import static com.caseware.updates.fake.FakeEngagementClient.PRODUCT;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.caseware.updates.fake.FakeEngagementClient;
-import com.caseware.updates.fake.FakeSummaryClient;
 import com.caseware.updates.fake.InMemoryUpdateDatabase;
+import com.caseware.updates.fake.InMemoryUpdateDatabase.Offer;
 import com.caseware.updates.fake.MutableClock;
 import com.caseware.updates.fake.RecordingDeadLetterPublisher;
 import com.caseware.updates.fake.RecordingDeadLetterPublisher.DeadLetter;
@@ -17,7 +16,6 @@ import com.caseware.updates.model.EngagementMessage;
 import com.caseware.updates.model.EngagementStateUpdateEvent;
 import com.caseware.updates.model.LoadResult;
 import com.caseware.updates.model.Region;
-import com.caseware.updates.model.SummaryResult;
 import com.caseware.updates.model.SyncRequest;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
@@ -30,13 +28,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
  * The handler against in-memory fakes: no Docker, no AWS, no sleeps. Concurrency is driven with latches and
- * barriers, time with a mutable clock. Test numbers follow the Part 2 test list.
+ * barriers, engagement-service's time with a mutable clock.
  */
 @Timeout(30)
 class EngagementMessageHandlerTest {
@@ -44,13 +43,10 @@ class EngagementMessageHandlerTest {
     private static final Region REGION = Region.EU;
     private static final Instant T0 = Instant.parse("2026-03-02T02:00:00Z");
 
-    /** This pod's clock: the handler's. */
-    private final MutableClock clock = new MutableClock(T0);
     /** engagement-service's clock: stamps events and loaded snapshots. */
     private final MutableClock engagementServiceClock = new MutableClock(T0);
     private final InMemoryUpdateDatabase db = new InMemoryUpdateDatabase();
     private final FakeEngagementClient engagements = new FakeEngagementClient(engagementServiceClock);
-    private final FakeSummaryClient summaries = new FakeSummaryClient();
     private final RecordingDeadLetterPublisher deadLetters = new RecordingDeadLetterPublisher();
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
 
@@ -75,29 +71,22 @@ class EngagementMessageHandlerTest {
     }
 
     @Test
-    @DisplayName("2. a duplicate SyncRequest after success does not load again, and the offer is still there")
+    @DisplayName("2. a duplicate SyncRequest after success does not load again")
     void duplicateSyncRequestDoesNotLoadAgain() throws Exception {
         EngagementMessageHandler handler = handler(20);
-        db.publishVersion(PRODUCT, 8);
 
         handler.handle(sync("eng-1"));
-        clock.advance(Duration.ofMinutes(5));
         handler.handle(sync("eng-1"));
 
         assertThat(engagements.calls()).isEqualTo(1);
+        assertThat(outcome("loaded")).isEqualTo(1);
         assertThat(outcome("skipped")).isEqualTo(1);
-        assertThat(db.pendingUpdate("eng-1")).hasValueSatisfying(offer -> {
-            assertThat(offer.fromVersion()).isEqualTo(4);
-            assertThat(offer.toVersion()).isEqualTo(8);
-            assertThat(offer.offeredAt()).isEqualTo(T0); // re-evaluating an unchanged offer keeps when it was made
-        });
     }
 
     @Test
     @DisplayName("3. transient and permanent failures stay isolated and leak no permit")
     void failuresAreIsolated() {
         EngagementMessageHandler handler = handler(4);
-        db.publishVersion(PRODUCT, 8);
         engagements.respond("eng-transient", new LoadResult.Transient("503"));
         engagements.respond("eng-permanent", new LoadResult.Permanent("404"));
         engagements.duringLoad(id -> {
@@ -118,25 +107,22 @@ class EngagementMessageHandlerTest {
         assertThat(results.get(2).exceptionNow()).hasRootCauseMessage("connection reset");
         results.subList(3, results.size()).forEach(EngagementMessageHandlerTest::assertSucceeded);
         assertThat(deadLetters.published()).containsExactly(new DeadLetter(sync("eng-permanent"), "404"));
-        healthy.forEach(id -> assertThat(db.pendingUpdate(id)).isPresent());
+        healthy.forEach(id -> assertThat(db.hasAnyEntry(id)).isTrue());
         // Nothing recorded for the failures, so a redelivered transient one loads again.
         assertThat(db.hasAnyEntry("eng-transient")).isFalse();
         assertThat(db.hasAnyEntry("eng-permanent")).isFalse();
         assertThat(db.hasAnyEntry("eng-crash")).isFalse();
         assertThat(outcome("transient")).isEqualTo(1);
         assertThat(outcome("permanent")).isEqualTo(1);
-        assertThat(outcome("loaded")).isEqualTo(10);
         assertThat(outcome("error")).isEqualTo(1); // the adapter crash
+        assertThat(outcome("loaded")).isEqualTo(10);
         assertThat(loadsInFlight()).isZero();
     }
 
     @Test
-    @DisplayName("4. out of order: a newer ACCEPTED beats an older SYNCED, even with the pod clock 10 min ahead")
-    void newerEventWinsOverOlderSync() throws Exception {
-        // The SYNCED row must be ordered on engagement-service's clock: with the pod's, this pod would win.
-        clock.advance(Duration.ofMinutes(10));
+    @DisplayName("4. out of order: a decision made during the load beats the SYNCED snapshot")
+    void decisionDuringTheLoadBeatsTheSnapshot() throws Exception {
         EngagementMessageHandler handler = handler(20);
-        db.publishVersion(PRODUCT, 8);
         CountDownLatch loading = new CountDownLatch(1);
         CountDownLatch finishLoad = new CountDownLatch(1);
         engagements.duringLoad(id -> {
@@ -145,11 +131,11 @@ class EngagementMessageHandlerTest {
         });
 
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            // engagement-service reads the engagement on v4 at T0 (its clock)...
+            // engagement-service reads the engagement on v4 at T0, by its own clock...
             Future<Void> sync = executor.submit(() -> handle(handler, sync("eng-1")));
             await(loading);
             // ...while the user accepts v8 at T0 + 30 s, and the load takes its minute.
-            handler.handle(accepted("eng-1", 8, T0.plusSeconds(30)));
+            handler.handle(event("eng-1", EngagementEventType.ACCEPTED, 8, null, T0.plusSeconds(30)));
             engagementServiceClock.advance(Duration.ofMinutes(1));
             finishLoad.countDown();
             sync.get(10, SECONDS); // appends SYNCED stamped T0 by engagement-service, older than the decision
@@ -159,85 +145,40 @@ class EngagementMessageHandlerTest {
             assertThat(state.latest().eventType()).isEqualTo(EngagementEventType.ACCEPTED);
             assertThat(state.latest().appliedVersion()).isEqualTo(8);
         });
-        assertThat(db.pendingUpdate("eng-1")).isEmpty(); // the stale v4 snapshot would have offered v4 → v8
-        assertThat(summaries.calls()).isZero();
     }
 
     @Test
-    @DisplayName("5. an empty diff deletes the existing offer")
-    void emptyDiffDeletesExistingOffer() throws Exception {
+    @DisplayName("5. a decision or an archive removes the offer it made obsolete, and only that one")
+    void decisionsRemoveObsoleteOffers() throws Exception {
         EngagementMessageHandler handler = handler(20);
-        db.publishVersion(PRODUCT, 7);
-        handler.handle(created("eng-1", 6, T0));
-        assertThat(db.pendingUpdate("eng-1")).hasValueSatisfying(offer -> assertThat(offer.toVersion()).isEqualTo(7));
+        db.putOffer("eng-created", 4, 8);
+        db.putOffer("eng-accepted", 4, 8);
+        db.putOffer("eng-declined-older", 4, 8);
+        db.putOffer("eng-declined", 4, 8);
+        db.putOffer("eng-archived", 4, 8);
 
-        // v7 is withdrawn: v8 restores v6's content, so v6 → v8 has nothing to show.
-        db.publishVersion(PRODUCT, 8);
-        summaries.answer((product, from, to) -> new SummaryResult.EmptyDiff());
-        handler.handle(created("eng-1", 6, T0)); // a redelivery re-evaluates
+        handler.handle(event("eng-created", EngagementEventType.CREATED, 4, null, T0));
+        handler.handle(event("eng-accepted", EngagementEventType.ACCEPTED, 6, null, T0));
+        handler.handle(event("eng-declined-older", EngagementEventType.DECLINED, 4, 7L, T0));
+        handler.handle(event("eng-declined", EngagementEventType.DECLINED, 4, 8L, T0));
+        handler.handle(event("eng-archived", EngagementEventType.ARCHIVED, 4, null, T0));
 
-        assertThat(db.pendingUpdate("eng-1")).isEmpty();
+        assertThat(db.offer("eng-created")).hasValue(new Offer(4, 8));
+        assertThat(db.offer("eng-accepted")).isEmpty(); // the next publish offers from v6
+        // The user declined v7 while v8 was being published: the v8 offer they have not seen stays.
+        assertThat(db.offer("eng-declined-older")).hasValue(new Offer(4, 8));
+        assertThat(db.offer("eng-declined")).isEmpty();
+        assertThat(db.offer("eng-archived")).isEmpty();
     }
 
     @Test
-    @DisplayName("6. a stale evaluation does not overwrite the newer result")
-    void staleEvaluationDoesNotOverwriteNewerResult() throws Exception {
-        EngagementMessageHandler handler = handler(20);
-        db.publishVersion(PRODUCT, 8);
-        CountDownLatch summarizing = new CountDownLatch(1);
-        CountDownLatch finishSummary = new CountDownLatch(1);
-        summaries.answer((product, from, to) -> {
-            summarizing.countDown();
-            await(finishSummary);
-            return FakeSummaryClient.ready(product, from, to);
-        });
-
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            // CREATED on v4: its evaluation waits in summarize for v4 → v8...
-            Future<Void> created = executor.submit(() -> handle(handler, created("eng-1", 4, T0)));
-            await(summarizing);
-            // ...while ACCEPTED v8 completes: nothing to offer.
-            handler.handle(accepted("eng-1", 8, T0.plusSeconds(60)));
-            finishSummary.countDown();
-            created.get(10, SECONDS);
-        }
-
-        assertThat(db.pendingUpdate("eng-1")).isEmpty();
-        assertThat(outcome("stale_write_skipped")).isEqualTo(1);
-    }
-
-    @Test
-    @DisplayName("7. summarize fails after the SYNCED row: the redelivery skips the load and creates the offer")
-    void redeliveryAfterFailedSummarySkipsTheLoad() throws Exception {
-        EngagementMessageHandler handler = handler(20);
-        db.publishVersion(PRODUCT, 8);
-        summaries.answer((product, from, to) -> {
-            throw new IllegalStateException("summary-service unavailable");
-        });
-
-        assertThatThrownBy(() -> handler.handle(sync("eng-1"))).hasMessage("summary-service unavailable");
-        assertThat(outcome("error")).isEqualTo(1);
-        assertThat(db.hasAnyEntry("eng-1")).isTrue();
-        assertThat(db.pendingUpdate("eng-1")).isEmpty();
-
-        summaries.answer(FakeSummaryClient::ready);
-        clock.advance(Duration.ofMinutes(5));
-        handler.handle(sync("eng-1")); // SQS redelivers
-
-        assertThat(engagements.calls()).isEqualTo(1);
-        assertThat(db.pendingUpdate("eng-1")).hasValueSatisfying(offer -> {
-            assertThat(offer.fromVersion()).isEqualTo(4);
-            assertThat(offer.toVersion()).isEqualTo(8);
-        });
-    }
-
-    @Test
-    @DisplayName("8. a message for another region goes to the DLQ: no load, no write")
+    @DisplayName("6. a message for another region goes to the DLQ: no load, no write")
     void regionMismatchGoesToTheDeadLetterQueue() throws Exception {
         EngagementMessageHandler handler = handler(20);
+        db.putOffer("eng-2", 4, 8);
         SyncRequest canadianSync = new SyncRequest("eng-1", Region.CA);
         EngagementStateUpdateEvent usEvent = new EngagementStateUpdateEvent(
-                "eng-2", FIRM, PRODUCT, Region.US, EngagementEventType.CREATED, 4, null, null, null, T0);
+                "eng-2", FIRM, PRODUCT, Region.US, EngagementEventType.ACCEPTED, 8, null, null, null, T0);
 
         handler.handle(canadianSync);
         handler.handle(usEvent);
@@ -249,54 +190,12 @@ class EngagementMessageHandlerTest {
         assertThat(engagements.calls()).isZero();
         assertThat(db.hasAnyEntry("eng-1")).isFalse();
         assertThat(db.hasAnyEntry("eng-2")).isFalse();
+        assertThat(db.offer("eng-2")).hasValue(new Offer(4, 8));
         assertThat(outcome("permanent")).isEqualTo(2);
     }
 
-    @Test
-    @DisplayName("9. while one evaluation is blocked in summarize, other loads can use every permit")
-    void summarizeHoldsNoPermit() throws Exception {
-        int permits = 4;
-        EngagementMessageHandler handler = handler(permits);
-        db.publishVersion(PRODUCT, 8);
-        CountDownLatch summarizing = new CountDownLatch(1);
-        CountDownLatch finishSummary = new CountDownLatch(1);
-        summaries.answer((product, from, to) -> {
-            summarizing.countDown();
-            await(finishSummary);
-            return FakeSummaryClient.ready(product, from, to);
-        });
-
-        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            Future<Void> slow = executor.submit(() -> handle(handler, sync("eng-slow")));
-            await(summarizing); // eng-slow is loaded and now waits in summarize
-
-            // The others are already on v8, so they need no summary. The barrier opens only if all of their loads
-            // run at the same time, which needs every permit.
-            CyclicBarrier allPermits = new CyclicBarrier(permits);
-            engagements.duringLoad(id -> allPermits.await(10, SECONDS));
-            List<Future<Void>> others = IntStream.range(0, permits)
-                    .mapToObj(i -> {
-                        engagements.respondOnVersion("eng-" + i, 8);
-                        return executor.submit(() -> handle(handler, sync("eng-" + i)));
-                    })
-                    .toList();
-            for (Future<Void> other : others) {
-                other.get(10, SECONDS);
-            }
-
-            assertThat(slow).isNotDone();
-            finishSummary.countDown();
-            slow.get(10, SECONDS);
-        }
-
-        assertThat(engagements.peakInFlight()).isEqualTo(permits);
-        assertThat(db.pendingUpdate("eng-slow")).isPresent();
-        assertThat(loadsInFlight()).isZero();
-    }
-
     private EngagementMessageHandler handler(int permits) {
-        return new EngagementMessageHandler(
-                REGION, permits, db, db, db, engagements, summaries, deadLetters, clock, meters);
+        return new EngagementMessageHandler(REGION, permits, db, db, engagements, deadLetters, meters);
     }
 
     /** Handles each message on its own virtual thread, all at once, and waits until every one has finished. */
@@ -343,22 +242,23 @@ class EngagementMessageHandlerTest {
         return new SyncRequest(engagementId, REGION);
     }
 
-    private static EngagementStateUpdateEvent created(String engagementId, long appliedVersion, Instant at) {
-        return new EngagementStateUpdateEvent(
-                engagementId, FIRM, PRODUCT, REGION, EngagementEventType.CREATED, appliedVersion, null, null, null, at);
-    }
-
-    private static EngagementStateUpdateEvent accepted(String engagementId, long appliedVersion, Instant at) {
+    private static EngagementStateUpdateEvent event(
+            String engagementId,
+            EngagementEventType type,
+            long appliedVersion,
+            @Nullable Long declinedVersion,
+            Instant at) {
+        boolean decision = type == EngagementEventType.ACCEPTED || type == EngagementEventType.DECLINED;
         return new EngagementStateUpdateEvent(
                 engagementId,
                 FIRM,
                 PRODUCT,
                 REGION,
-                EngagementEventType.ACCEPTED,
+                type,
                 appliedVersion,
-                null,
-                "summaries/" + PRODUCT + "/4-" + appliedVersion,
-                "user-1",
+                declinedVersion,
+                decision ? "summaries/" + PRODUCT + "/4-8" : null,
+                decision ? "user-1" : null,
                 at);
     }
 }

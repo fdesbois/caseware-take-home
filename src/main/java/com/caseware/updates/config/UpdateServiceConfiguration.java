@@ -5,11 +5,8 @@ import com.caseware.updates.port.DeadLetterPublisher;
 import com.caseware.updates.port.EngagementClient;
 import com.caseware.updates.port.EngagementHistoryRepository;
 import com.caseware.updates.port.PendingUpdateRepository;
-import com.caseware.updates.port.ProductVersionRepository;
-import com.caseware.updates.port.SummaryClient;
 import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
 import io.micrometer.core.instrument.MeterRegistry;
-import java.time.Clock;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -25,38 +22,21 @@ import org.springframework.core.task.SimpleAsyncTaskExecutor;
 class UpdateServiceConfiguration {
 
     @Bean
-    Clock clock() {
-        return Clock.systemUTC();
-    }
-
-    @Bean
     EngagementMessageHandler engagementMessageHandler(
             UpdateServiceProperties properties,
             EngagementHistoryRepository history,
-            ProductVersionRepository products,
             PendingUpdateRepository pendingUpdates,
             EngagementClient engagements,
-            SummaryClient summaries,
             DeadLetterPublisher deadLetters,
-            Clock clock,
             MeterRegistry meters) {
         return new EngagementMessageHandler(
-                properties.region(),
-                properties.permitsPerPod(),
-                history,
-                products,
-                pendingUpdates,
-                engagements,
-                summaries,
-                deadLetters,
-                clock,
-                meters);
+                properties.region(), properties.permitsPerPod(), history, pendingUpdates, engagements, deadLetters, meters);
     }
 
     /**
      * Spring Cloud AWS runs listeners on a pool of platform threads and ignores
      * {@code spring.threads.virtual.enabled}. This moves them to virtual threads, so a listener blocked for a
-     * minute in a load or a summary parks instead of holding an OS thread. Each container's back-pressure still
+     * minute in a load parks instead of holding an OS thread. Each container's back-pressure still
      * caps the messages it has in flight.
      */
     @Bean

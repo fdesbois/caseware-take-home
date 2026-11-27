@@ -4,7 +4,6 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.caseware.updates.fake.FakeEngagementClient;
-import com.caseware.updates.fake.FakeSummaryClient;
 import com.caseware.updates.fake.InMemoryUpdateDatabase;
 import com.caseware.updates.fake.RecordingDeadLetterPublisher;
 import io.awspring.cloud.sqs.listener.MessageListenerContainerRegistry;
@@ -45,11 +44,6 @@ class SqsListenerWiringTest {
         @Bean
         FakeEngagementClient engagementClient() {
             return new FakeEngagementClient(Clock.systemUTC());
-        }
-
-        @Bean
-        FakeSummaryClient summaryClient() {
-            return new FakeSummaryClient();
         }
 
         @Bean

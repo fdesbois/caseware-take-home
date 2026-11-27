@@ -21,6 +21,8 @@ public interface EngagementHistoryRepository {
     /**
      * The latest row by {@code sourceUpdatedAt}, plus the max declined version over all rows; empty when the
      * engagement has no row. Rows with the same {@code sourceUpdatedAt} rank in {@link EngagementEventType} order.
+     *
+     * <p>Read by the publish fan-out (Flow B) to compute offers; this component only writes the rows it orders.
      */
     Optional<EngagementState> currentState(String engagementId);
 }
